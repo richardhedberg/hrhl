@@ -994,11 +994,6 @@ export default function App() {
           <h1 className="mt-2 text-3xl font-semibold tracking-tight">
             HRHL Season Analysis 24/25
           </h1>
-          {heatmap?.season_year && (
-            <p className="mt-2 text-sm text-muted-foreground">
-              Season {heatmap.season_year}-{heatmap.season_year + 1} · League {heatmap.league_key}
-            </p>
-          )}
         </header>
 
         <div className="space-y-10">
