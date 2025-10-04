@@ -18,7 +18,6 @@ import {
   Scatter,
   Cell,
   Treemap,
-  Rectangle,
 } from "recharts";
 
 import {
@@ -87,6 +86,34 @@ type CategoryStatsResponse = {
       }
     >;
   }[];
+};
+
+type StandingsEntry = {
+  team: string;
+  rank: number;
+  points: number;
+  wins: number;
+  losses: number;
+  ties: number;
+  teamIndex: number;
+};
+
+type StandingsFrame = {
+  week: number;
+  entries: StandingsEntry[];
+  byTeam: Map<string, StandingsEntry>;
+};
+
+type StandingsDisplayRow = {
+  team: string;
+  color: string;
+  rankExact: number;
+  rank: number;
+  points: number;
+  wins: number;
+  losses: number;
+  ties: number;
+  record: string;
 };
 
 type HoverState = {
@@ -289,84 +316,12 @@ const TREEMAP_NEGATIVE_RGB = { r: 239, g: 68, b: 68 };
 const TREEMAP_POSITIVE_RGB = { r: 34, g: 197, b: 94 };
 const TREEMAP_FALLBACK = "rgba(26,35,48,0)";
 
-const RACE_BAR_HEIGHT = 40;
-const RACE_BAR_GAP = 8;
-const RACE_TOP_OFFSET = 8;
-const BAR_TRANSITION_MS = 200;
-const BAR_TRANSITION = `transform ${BAR_TRANSITION_MS}ms ease-in-out`;
-
-type RaceBarPayload = {
-  label: string;
-  record: string;
-  total: number;
-  displayY: number;
-};
-
-const RaceBarShape = ({
-  x = 0,
-  width = 0,
-  fill,
-  payload,
-}: {
-  x?: number;
-  width?: number;
-  fill: string;
-  payload: RaceBarPayload;
-}) => {
-  const safeX = Number.isFinite(x) ? x : 0;
-  const displayY = payload?.displayY ?? 0;
-  const translateY = RACE_TOP_OFFSET + displayY * (RACE_BAR_HEIGHT + RACE_BAR_GAP);
-  const h = RACE_BAR_HEIGHT;
-  return (
-    <g
-      style={{
-        transform: `translate(${safeX}px, ${translateY}px)`,
-        transition: BAR_TRANSITION,
-        transformOrigin: "0 0",
-      }}
-    >
-      <Rectangle
-        width={Math.max(width, 0)}
-        height={h}
-        fill={fill}
-        radius={0}
-        stroke="transparent"
-        style={{ transition: `width ${BAR_TRANSITION_MS}ms ease-in-out` }}
-      />
-      <text
-        x={14}
-        y={h / 2 - 8}
-        fill="#e2e8f0"
-        fontSize={16}
-        fontWeight={700}
-        style={{ pointerEvents: "none", transition: BAR_TRANSITION }}
-      >
-        {payload.label}
-      </text>
-      <text
-        x={14}
-        y={h / 2 + 14}
-        fill="#111827"
-        fontSize={12}
-        fontWeight={600}
-        style={{ pointerEvents: "none", transition: BAR_TRANSITION }}
-      >
-        {payload.record}
-      </text>
-      <text
-        x={Math.max(width, 0) + 20}
-        y={h / 2 + 5}
-        fill="#f8fafc"
-        fontSize={13}
-        fontWeight={700}
-        textAnchor="start"
-        style={{ pointerEvents: "none", transition: `all ${BAR_TRANSITION_MS}ms ease-in-out` }}
-      >
-        {payload.total.toFixed(1)}
-      </text>
-    </g>
-  );
-};
+const STANDINGS_BAR_HEIGHT = 48;
+const STANDINGS_BAR_GAP = 10;
+const STANDINGS_STEP_MS = 900;
+const STANDINGS_INITIAL_STEP_MS = 300;
+const STANDINGS_TRANSITION_MS = STANDINGS_STEP_MS;
+const STANDINGS_NUMBERS_WIDTH = 48;
 
 function contributionFill(delta: number | null, min: number, max: number) {
   if (delta == null || Number.isNaN(delta)) return TREEMAP_FALLBACK;
@@ -528,8 +483,8 @@ export default function App() {
   const [analytics, setAnalytics] = useState<SeasonAnalyticsResponse | null>(null);
   const [analyticsError, setAnalyticsError] = useState<string | null>(null);
   const [selectedContributionTeam, setSelectedContributionTeam] = useState<string | null>(null);
-  const [raceProgress, setRaceProgress] = useState(0);
-  const [racePlaying, setRacePlaying] = useState(false);
+  const [standingsProgress, setStandingsProgress] = useState(0);
+  const [standingsPlaying, setStandingsPlaying] = useState(false);
   const [fallbackRosterMoves, setFallbackRosterMoves] = useState<RosterMovesEntry[] | null>(null);
   const [hover, setHover] = useState<HoverState | null>(null);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
@@ -618,170 +573,178 @@ export default function App() {
 
   const heatmapData = useHeatmapData(heatmap);
   const radarData = computeRadarDatasets(radarStats);
-  const standingsRace = useMemo(() => {
-    if (!heatmapData)
+  const standingsData = useMemo(() => {
+    if (!heatmapData) {
       return {
-        frames: [] as {
-          week: number;
-          entries: {
-            team: string;
-            label: string;
-            total: number;
-            rank: number;
-            color: string;
-            wins: number;
-            losses: number;
-            ties: number;
-            record: string;
-            teamIndex: number;
-          }[];
-        }[],
-        maxTotal: 0,
+        frames: [] as StandingsFrame[],
         order: [] as string[],
+        maxPoints: 0,
       };
+    }
     const { teams, weeks, outcome } = heatmapData;
     const teamCount = teams.length;
     if (!teamCount || !weeks.length) {
-      return { frames: [], series: [], maxTotal: 0 };
+      return {
+        frames: [] as StandingsFrame[],
+        order: teams.slice(),
+        maxPoints: 0,
+      };
     }
+
     const wins = Array(teamCount).fill(0);
     const losses = Array(teamCount).fill(0);
     const ties = Array(teamCount).fill(0);
-    const frames: {
-      week: number;
-      entries: {
-        team: string;
-        label: string;
-        total: number;
-        rank: number;
-        color: string;
-        wins: number;
-        losses: number;
-        ties: number;
-        record: string;
-        teamIndex: number;
-      }[];
-    }[] = [];
-    let maxTotal = 0;
+    const frames: StandingsFrame[] = [];
+    let maxPoints = 0;
 
     weeks.forEach((week, weekIdx) => {
-      for (let teamIdx = 0; teamIdx < teamCount; teamIdx += 1) {
-        const result = outcome?.[teamIdx]?.[weekIdx];
-        if (result === "W") wins[teamIdx] += 1;
-        else if (result === "L") losses[teamIdx] += 1;
-        else if (result === "T" || result === "D") ties[teamIdx] += 1;
-        const score = wins[teamIdx] + ties[teamIdx] * 0.5;
-        maxTotal = Math.max(maxTotal, score);
+      for (let idx = 0; idx < teamCount; idx += 1) {
+        const result = outcome?.[idx]?.[weekIdx];
+        if (result === "W") wins[idx] += 1;
+        else if (result === "L") losses[idx] += 1;
+        else if (result === "T" || result === "D") ties[idx] += 1;
       }
-      const ranking = wins
-        .map((_, idx) => {
-          const score = wins[idx] + ties[idx] * 0.5;
-          return { score, idx };
+
+      const ranked = teams
+        .map((team, idx) => {
+          const points = wins[idx] * 2 + ties[idx];
+          maxPoints = Math.max(maxPoints, points);
+          return {
+            team,
+            points,
+            wins: wins[idx],
+            losses: losses[idx],
+            ties: ties[idx],
+            teamIndex: idx,
+            rank: 0,
+          } as StandingsEntry;
         })
         .sort((a, b) => {
-          if (b.score === a.score) {
-            const lossDiff = losses[a.idx] - losses[b.idx];
-            if (lossDiff !== 0) return lossDiff;
-            return a.idx - b.idx;
-          }
-          return b.score - a.score;
-        });
-      const positions = Array(teamCount).fill(teamCount);
-      ranking.forEach((entry, orderIdx) => {
-        const rank = orderIdx + 1;
-        positions[entry.idx] = rank;
-      });
-      const frameEntries = ranking.map((entry) => {
-        const teamIdx = entry.idx;
-        const team = teams[teamIdx];
-        const rank = positions[teamIdx];
-        const score = wins[teamIdx] + ties[teamIdx] * 0.5;
-        const record = `${wins[teamIdx]}-${losses[teamIdx]}-${ties[teamIdx]}`;
-        return {
-          team,
-          label: `#${rank} ${team}`,
-          total: score,
-          rank,
-          color: SCATTER_COLORS[teamIdx % SCATTER_COLORS.length],
-          wins: wins[teamIdx],
-          losses: losses[teamIdx],
-          ties: ties[teamIdx],
-          record,
-          teamIndex: teamIdx,
-        };
-      });
-      frames.push({ week, entries: frameEntries });
-    });
+          if (b.points !== a.points) return b.points - a.points;
+          if (b.wins !== a.wins) return b.wins - a.wins;
+          if (a.losses !== b.losses) return a.losses - b.losses;
+          return a.team.localeCompare(b.team);
+        })
+        .map((entry, orderIdx) => ({ ...entry, rank: orderIdx + 1 }));
 
-    return { frames, maxTotal, order: teams.slice() };
-  }, [heatmapData]);
-
-  const frameCount = standingsRace.frames.length;
-  const clampedProgress = frameCount ? Math.min(Math.max(raceProgress, 0), frameCount - 1) : 0;
-  const currentFrameIndex = frameCount ? Math.floor(clampedProgress) : 0;
-  const nextFrameIndex = frameCount ? Math.min(currentFrameIndex + 1, frameCount - 1) : 0;
-  const frameT = frameCount ? clampedProgress - currentFrameIndex : 0;
-
-  const raceChart = useMemo(() => {
-    if (!frameCount)
-      return {
-        week: 0,
-        entries: [] as (typeof standingsRace.frames[number]["entries"] & { displayY: number })[],
-      };
-    const { order } = standingsRace;
-    const currentFrame = standingsRace.frames[currentFrameIndex];
-    const nextFrame = standingsRace.frames[nextFrameIndex];
-    const currentMap = new Map(currentFrame.entries.map((entry) => [entry.team, entry]));
-    const nextMap = new Map(nextFrame.entries.map((entry) => [entry.team, entry]));
-
-    const blended = order.map((team, teamIdx) => {
-      const currentEntry = currentMap.get(team) ?? currentFrame.entries.find((e) => e.team === team);
-      const nextEntry = nextMap.get(team) ?? nextFrame.entries.find((e) => e.team === team) ?? currentEntry;
-      if (!currentEntry || !nextEntry) return null;
-      const total = currentEntry.total + (nextEntry.total - currentEntry.total) * frameT;
-      const rankExact = currentEntry.rank + (nextEntry.rank - currentEntry.rank) * frameT;
-      const record = currentEntry.record;
-      const color = currentEntry.color;
-      return {
-        ...currentEntry,
-        total,
-        rankExact,
-        color,
-        record,
-        team,
-        teamIndex: teamIdx,
-      };
-    }).filter(Boolean) as {
-      team: string;
-      total: number;
-      rank: number;
-      rankExact: number;
-      label: string;
-      color: string;
-      record: string;
-      teamIndex: number;
-    }[];
-
-    const entries = blended.map((entry) => {
-      const roundedRank = Math.round(entry.rankExact);
-      const jitter = entry.teamIndex * 1e-3;
-      const displayY = entry.rankExact - 1 + jitter;
-      return {
-        ...entry,
-        rank: roundedRank,
-        label: `#${roundedRank} ${entry.team}`,
-        displayY,
-      };
+      const byTeam = new Map<string, StandingsEntry>();
+      ranked.forEach((entry) => byTeam.set(entry.team, entry));
+      frames.push({ week, entries: ranked, byTeam });
     });
 
     return {
-      week: Math.round(
-        (1 - frameT) * currentFrame.week +
-          frameT * (standingsRace.frames[nextFrameIndex]?.week ?? currentFrame.week)
-      ),
-      entries,
+      frames,
+      order: teams.slice(),
+      maxPoints,
     };
-  }, [frameCount, standingsRace, currentFrameIndex, nextFrameIndex, frameT]);
+  }, [heatmapData]);
+
+  const frameCount = standingsData.frames.length;
+  const finalFrameIndex = frameCount ? frameCount - 1 : 0;
+  const clampedProgress = frameCount
+    ? Math.min(Math.max(Math.round(standingsProgress), 0), finalFrameIndex)
+    : 0;
+  const currentFrame = standingsData.frames[clampedProgress];
+
+  useEffect(() => {
+    if (!frameCount) return;
+    setStandingsProgress(finalFrameIndex);
+  }, [frameCount, finalFrameIndex]);
+
+  useEffect(() => {
+    if (!standingsPlaying || !frameCount) return;
+
+    let rafId: number;
+    let previous: number | null = null;
+    let accumulator = 0;
+    let stepsTaken = 0;
+
+    const tick = (timestamp: number) => {
+      if (previous == null) {
+        previous = timestamp;
+      }
+      const delta = timestamp - previous;
+      previous = timestamp;
+      const stepDuration = stepsTaken === 0 ? STANDINGS_INITIAL_STEP_MS : STANDINGS_STEP_MS;
+      accumulator += delta;
+
+      if (accumulator >= stepDuration) {
+        accumulator -= stepDuration;
+        stepsTaken += 1;
+        let reachedEnd = false;
+        setStandingsProgress((prev) => {
+          const next = Math.min(prev + 1, finalFrameIndex);
+          if (next >= finalFrameIndex) reachedEnd = true;
+          return next;
+        });
+        if (reachedEnd) {
+          setStandingsPlaying(false);
+          return;
+        }
+      }
+
+      rafId = requestAnimationFrame(tick);
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [standingsPlaying, frameCount, finalFrameIndex]);
+
+  const teamColorMap = useMemo(() => {
+    const map = new Map<string, string>();
+    if (heatmapData?.teams) {
+      heatmapData.teams.forEach((team, idx) => {
+        map.set(team, SCATTER_COLORS[idx % SCATTER_COLORS.length]);
+      });
+    }
+    return map;
+  }, [heatmapData]);
+
+  const standingsRows = useMemo(() => {
+    if (!currentFrame) return [] as StandingsDisplayRow[];
+    const byTeam = currentFrame.byTeam;
+    return standingsData.order.map((team, idx) => {
+      const entry = byTeam.get(team);
+      if (!entry) {
+        return {
+          team,
+          color: SCATTER_COLORS[idx % SCATTER_COLORS.length],
+          rankExact: idx + 1,
+          rank: idx + 1,
+          points: 0,
+          wins: 0,
+          losses: 0,
+          ties: 0,
+          record: "0-0",
+        } as StandingsDisplayRow;
+      }
+      const color =
+        teamColorMap.get(team) ??
+        SCATTER_COLORS[entry.teamIndex % SCATTER_COLORS.length] ??
+        SCATTER_COLORS[idx % SCATTER_COLORS.length];
+      const record = entry.ties > 0 ? `${entry.wins}-${entry.losses}-${entry.ties}` : `${entry.wins}-${entry.losses}`;
+      return {
+        team,
+        color,
+        rankExact: entry.rank,
+        rank: entry.rank,
+        points: entry.points,
+        wins: entry.wins,
+        losses: entry.losses,
+        ties: entry.ties,
+        record,
+      } as StandingsDisplayRow;
+    });
+  }, [currentFrame, standingsData.order, teamColorMap]);
+
+  const standingsRanks = currentFrame?.entries ?? [];
+
+  const standingsTrackHeight = standingsRows.length
+    ? standingsRows.length * (STANDINGS_BAR_HEIGHT + STANDINGS_BAR_GAP) - STANDINGS_BAR_GAP
+    : 0;
+
+  const currentWeekNumber = currentFrame?.week ?? 0;
+  const isFinalWeek = frameCount ? clampedProgress >= finalFrameIndex : true;
 
   const sharpeHighlights = useMemo(() => {
     if (!analytics?.sharpe) return [];
@@ -909,46 +872,6 @@ export default function App() {
     if (firstKey) setSelectedContributionTeam(firstKey);
   }, [analytics, contributionByTeam, selectedContributionTeam]);
 
-  useEffect(() => {
-    if (!frameCount) {
-      setRaceProgress(0);
-      return;
-    }
-    setRaceProgress((prev) => {
-      if (!Number.isFinite(prev)) return 0;
-      const wrapped = prev % frameCount;
-      return wrapped < 0 ? wrapped + frameCount : wrapped;
-    });
-  }, [frameCount]);
-
-  useEffect(() => {
-    if (!frameCount || !racePlaying) return;
-    const weeksPerSecond = 0.5; // 2 seconds per week
-    let rafId: number;
-    let last = performance.now();
-    const step = (now: number) => {
-      const delta = now - last;
-      last = now;
-      let reachedEnd = false;
-      setRaceProgress((prev) => {
-        if (!frameCount) return 0;
-        const increment = (delta / 1000) * weeksPerSecond;
-        const next = Math.min(prev + increment, frameCount - 1);
-        if (next >= frameCount - 1 && increment > 0.0001) {
-          reachedEnd = true;
-        }
-        return next;
-      });
-      if (reachedEnd) {
-        setRacePlaying(false);
-        return;
-      }
-      rafId = window.requestAnimationFrame(step);
-    };
-    rafId = window.requestAnimationFrame(step);
-    return () => window.cancelAnimationFrame(rafId);
-  }, [frameCount, racePlaying]);
-
   const rosterMovesData = useMemo(() => {
     if (analytics?.rosterMoves && analytics.rosterMoves.length) {
       return analytics.rosterMoves.map((entry) => ({
@@ -997,84 +920,128 @@ export default function App() {
         </header>
 
         <div className="space-y-10">
-          {standingsRace.frames.length ? (
+          {standingsRows.length ? (
             <section className="space-y-4">
               <div>
                 <h2 className="text-2xl font-semibold tracking-tight">Season Standings Trajectory</h2>
-                <p className="text-sm text-muted-foreground">Bar race showing weekly ranks across the season.</p>
+                <p className="text-sm text-muted-foreground">
+                  Final standings appear by default. Press play to replay the season (win = 2 pts, draw = 1 pt).
+                </p>
               </div>
               <Card>
                 <CardHeader className="flex flex-col gap-3 pb-2 sm:flex-row sm:items-center sm:justify-between">
                   <div className="flex items-center gap-3 text-sm text-muted-foreground">
                     <button
                       onClick={() => {
-                        if (!racePlaying && frameCount && clampedProgress >= frameCount - 1) {
-                          setRaceProgress(0);
+                        if (!frameCount) return;
+                        if (standingsPlaying) {
+                          setStandingsPlaying(false);
+                          return;
                         }
-                        setRacePlaying((prev) => !prev);
+                        setStandingsProgress(0);
+                        setStandingsPlaying(true);
                       }}
                       className="rounded-full border border-border px-3 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground transition hover:border-foreground/40"
                     >
-                      {racePlaying ? "Pause" : "Play"}
+                      {standingsPlaying ? "Pause" : "Play"}
                     </button>
-                    <span>Week {raceChart.week ?? 0}</span>
+                    <span>Week {currentWeekNumber}</span>
                   </div>
                   <div className="flex-1 sm:flex sm:justify-end">
                     <input
                       type="range"
                       min={0}
-                      max={Math.max(frameCount - 1, 0)}
-                      step={0.001}
+                      max={Math.max(finalFrameIndex, 0)}
+                      step={1}
                       value={clampedProgress}
                       onChange={(evt) => {
-                        setRaceProgress(Number(evt.target.value));
-                        setRacePlaying(false);
+                        setStandingsPlaying(false);
+                        setStandingsProgress(Number(evt.target.value));
                       }}
                       className="w-full sm:w-72"
                     />
                   </div>
                 </CardHeader>
                 <CardContent>
-                  <div className="h-[40rem]">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart
-                        data={raceChart.entries}
-                        layout="vertical"
-                        barCategoryGap={8}
-                        barGap={4}
-                        margin={{ top: 24, right: 32, bottom: 24, left: 28 }}
+                  <div className="space-y-6">
+                    <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-muted-foreground">
+                      <div className="flex items-center gap-3">
+                        <span className="inline-flex h-2.5 w-2.5 rounded-full bg-emerald-400" />
+                        <span>{isFinalWeek ? "Final standings" : `After week ${currentWeekNumber}`}</span>
+                      </div>
+                      <span className="text-xs uppercase tracking-widest">Points = 2W + 1D</span>
+                    </div>
+                    <div className="relative overflow-hidden rounded-2xl border border-border bg-card/40">
+                      <div
+                        className="absolute left-4 top-4 flex flex-col text-xs font-semibold uppercase tracking-[0.03em] text-muted-foreground/70"
+                        style={{ width: STANDINGS_NUMBERS_WIDTH, gap: STANDINGS_BAR_GAP }}
                       >
-                        <CartesianGrid horizontal={false} stroke="rgba(255,255,255,0.05)" />
-                        <XAxis
-                          type="number"
-                          domain={[0, standingsRace.maxTotal || 1]}
-                          stroke="#6b7280"
-                          tick={{ fill: "#6b7280", fontSize: 10 }}
-                        />
-                        <YAxis type="category" dataKey="team" tick={false} width={0} stroke="#6b7280" />
-                        <RechartsTooltip
-                          cursor={{ fill: "rgba(0,0,0,0.2)" }}
-                          content={({ active, payload }) => {
-                            if (!active || !payload?.length) return null;
-                            const entry = payload[0]?.payload;
-                            if (!entry) return null;
+                        {standingsRanks.map((row, idx) => (
+                          <div
+                            key={`rank-${row.team}`}
+                            className="flex items-center justify-end pr-1"
+                            style={{
+                              height: STANDINGS_BAR_HEIGHT,
+                              marginBottom: idx === standingsRanks.length - 1 ? 0 : STANDINGS_BAR_GAP,
+                            }}
+                          >
+                            {row.rank.toString().padStart(2, "0")}
+                          </div>
+                        ))}
+                      </div>
+                      <div
+                        className="relative p-4"
+                        style={{ paddingLeft: STANDINGS_NUMBERS_WIDTH + 24 }}
+                      >
+                        <div
+                          className="relative"
+                          style={{ height: `${Math.max(standingsTrackHeight, 0)}px` }}
+                        >
+                          {standingsRows.map((row) => {
+                            const top = (row.rankExact - 1) * (STANDINGS_BAR_HEIGHT + STANDINGS_BAR_GAP);
+                            const widthPct = standingsData.maxPoints
+                              ? Math.max(0, (row.points / standingsData.maxPoints) * 100)
+                              : 0;
                             return (
-                              <div className="pointer-events-none rounded-xl border border-border bg-card/95 px-3 py-2 text-xs text-card-foreground shadow-xl">
-                                <p className="font-medium text-foreground">{entry.team}</p>
-                                <p className="text-muted-foreground">Rank: #{entry.rank}</p>
-                                <p className="text-muted-foreground">Record: {entry.record}</p>
-                                <p className="text-muted-foreground">Win Eq: {entry.total.toFixed(2)}</p>
+                              <div
+                                key={row.team}
+                                className="absolute left-0 right-0"
+                                style={{
+                                  top: `${top}px`,
+                                  transition: `top ${STANDINGS_TRANSITION_MS}ms ease`,
+                                }}
+                              >
+                                <div
+                                className="relative flex w-full items-center overflow-hidden rounded-xl border border-border bg-[#101010]"
+                                style={{ height: STANDINGS_BAR_HEIGHT }}
+                              >
+                                  <div
+                                    className="absolute inset-y-0 left-0 rounded-r-xl opacity-80"
+                                    style={{
+                                      width: `${widthPct}%`,
+                                      backgroundColor: row.color,
+                                      transition: `width ${STANDINGS_TRANSITION_MS}ms linear`,
+                                    }}
+                                  />
+                                  <div className="relative flex w-full items-center justify-between gap-4 px-4 py-3">
+                                    <div>
+                                      <div className="text-base font-semibold text-foreground">{row.team}</div>
+                                      <div className="text-[11px] font-semibold uppercase tracking-wide text-foreground">
+                                        Record {row.record}
+                                      </div>
+                                    </div>
+                                    <div className="text-right">
+                                      <div className="text-xl font-bold text-foreground">{Math.round(row.points)}</div>
+                                      <div className="text-[10px] uppercase tracking-[0.35em] text-muted-foreground">PTS</div>
+                                    </div>
+                                  </div>
+                                </div>
                               </div>
                             );
-                          }}
-                        />
-                        <Bar dataKey="total" barSize={56} radius={[0, 0, 0, 0]} shape={<RaceBarShape />} isAnimationActive={false}>
-                          {raceChart.entries.map((entry) => (
-                            <Cell key={entry.team} fill={entry.color} />
-                          ))}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
+                          })}
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </CardContent>
               </Card>
