@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Weekly Category Wins Heatmap</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --fg: #dfe7f3;
+    --muted: #8fa3bf;
+  }
+  body {
+    margin: 0;
+    font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  header {
+    padding: 16px 18px;
+    border-bottom: 1px solid #1f2a3a;
+  }
+  .container {
+    padding: 18px;
+  }
+  .grid {
+    overflow: auto;
+    border: 1px solid #1f2a3a;
+    border-radius: 16px;
+  }
+  table {
+    border-collapse: separate;
+    border-spacing: 0;
+    width: max-content;
+  }
+  th,
+  td {
+    padding: 8px 10px;
+    white-space: nowrap;
+  }
+  th.sticky {
+    position: sticky;
+    left: 0;
+    background: #0e1522;
+    z-index: 2;
+  }
+  thead th {
+    position: sticky;
+    top: 0;
+    background: #0e1522;
+    z-index: 1;
+  }
+  td.cell {
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    min-width: 70px;
+  }
+  .note {
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 8px;
+  }
+  .tooltip {
+    position: fixed;
+    pointer-events: none;
+    background: rgba(9, 13, 19, 0.96);
+    color: var(--fg);
+    border: 1px solid #1f2a3a;
+    border-radius: 10px;
+    padding: 10px 12px;
+    box-shadow: 0 18px 36px rgba(0, 0, 0, 0.45);
+    font-size: 13px;
+    line-height: 1.35;
+    max-width: 260px;
+    z-index: 10;
+    left: 0;
+    top: 0 ;
+  }
+  .tooltip[hidden] {
+    display: none !important;
+  }
+  .tooltip strong {
+    display: block;
+    font-size: 13px;
+    margin-bottom: 4px;
+    color: #fff;
+  }
+  .tooltip .meta {
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 6px;
+  }
+</style>
+<header><strong>Weekly Category Wins Heatmap</strong></header>
+<div class="container">
+  <div class="grid"><div id="grid">Loading…</div></div>
+  <div class="note">
+    Number = categories won that week. Suffix = W/L/T. Hover a cell to see the
+    opponent, their wins, and the margin. Colors run dark red → red → green →
+    bright green.
+  </div>
+</div>
+<div id="tooltip" class="tooltip" hidden></div>
+<script>
+  function clamp01(x) {
+    return Math.max(0, Math.min(1, x));
+  }
+  function redGreen(v, vmin, vmax) {
+    if (v == null || isNaN(v)) return "#1a2330";
+    const t = clamp01((v - vmin) / Math.max(1e-6, vmax - vmin));
+    const stops = [
+      { t: 0.0, r: 43, g: 10, b: 10 },
+      { t: 0.35, r: 185, g: 28, b: 28 },
+      { t: 0.65, r: 21, g: 128, b: 61 },
+      { t: 1.0, r: 167, g: 243, b: 208 },
+    ];
+    let i = 0;
+    while (i < stops.length - 1 && t > stops[i + 1].t) i++;
+    const a = stops[i],
+      b = stops[Math.min(i + 1, stops.length - 1)];
+    const u = (t - a.t) / Math.max(1e-6, b.t - a.t);
+    const R = Math.round(a.r + (b.r - a.r) * u),
+      G = Math.round(a.g + (b.g - a.g) * u),
+      B = Math.round(a.b + (b.b - a.b) * u);
+    return "rgb(" + R + "," + G + "," + B + ")";
+  }
+  function textColorFor(bg) {
+    const m = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(bg);
+    if (!m) return "#fff";
+    const r = +m[1],
+      g = +m[2],
+      b = +m[3];
+    const L = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+    return L > 0.52 ? "#000" : "#fff";
+  }
+  function escapeHTML(value) {
+    if (value == null) return "";
+    return String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+  const escapeAttr = escapeHTML;
+
+  async function load() {
+    const r = await fetch("/api/weekly-matrix");
+    const data = await r.json();
+    const grid = document.getElementById("grid");
+    const tooltip = document.getElementById("tooltip");
+    if (!r.ok) {
+      grid.innerHTML =
+        '<p style="padding:16px;color:#f88">Error: ' +
+        escapeHTML(data.error || r.status) +
+        "</p>";
+      return;
+    }
+
+    const teams = data.teams || [];
+    const weeks = data.weeks || [];
+    const points = data.points || [];
+    const outcome = data.outcome || [];
+    const oppName = data.oppName || [];
+    const oppPoints = data.oppPoints || [];
+
+    let vmin = Infinity,
+      vmax = -Infinity;
+    for (const row of points) {
+      if (!Array.isArray(row)) continue;
+      for (const v of row) {
+        if (v == null) continue;
+        if (v < vmin) vmin = v;
+        if (v > vmax) vmax = v;
+      }
+    }
+    if (!isFinite(vmin) || !isFinite(vmax)) {
+      vmin = 0;
+      vmax = 1;
+    }
+
+    let html = '<table><thead><tr><th class="sticky">Team</th>';
+    for (const w of weeks) html += "<th>W" + escapeHTML(w) + "</th>";
+    html += "</tr></thead><tbody>";
+
+    for (let i = 0; i < teams.length; i++) {
+      const team = teams[i] ?? "";
+      html += '<tr><td class="sticky">' + escapeHTML(team) + "</td>";
+      for (let j = 0; j < weeks.length; j++) {
+        const v = points[i] && points[i][j] != null ? points[i][j] : null;
+        const res = outcome && outcome[i] ? outcome[i][j] || "" : "";
+        const opp = oppName && oppName[i] ? oppName[i][j] || "" : "";
+        const opvRaw = oppPoints && oppPoints[i] ? oppPoints[i][j] : null;
+
+        const bg = redGreen(v, vmin, vmax);
+        const fg = textColorFor(bg);
+
+        const label = (v != null ? String(v) : "–") + (res ? " " + res : "");
+        const attrs =
+          ' data-team="' + escapeAttr(team) +
+          '" data-week="' + escapeAttr(weeks[j]) +
+          '" data-points="' + escapeAttr(v != null ? v : "") +
+          '" data-result="' + escapeAttr(res) +
+          '" data-opp="' + escapeAttr(opp) +
+          '" data-opp-points="' + escapeAttr(opvRaw != null ? opvRaw : "") +
+          '" data-label="' + escapeAttr(label) + '"';
+
+        html +=
+          '<td class="cell" tabindex="0"' +
+          attrs +
+          ' style="background:' +
+          bg +
+          ';color:' +
+          fg +
+          '">' +
+          escapeHTML(label) +
+          "</td>";
+      }
+      html += "</tr>";
+    }
+
+    html += "</tbody></table>";
+    grid.innerHTML = html;
+
+    tooltip.hidden = true;
+    const OFFSET_X = 12;
+    const OFFSET_Y = 16;
+    const cells = grid.querySelectorAll("td.cell");
+
+    function buildTooltip(cell) {
+      const team = cell.dataset.team || "";
+      const week = cell.dataset.week || "";
+      const cats = cell.dataset.points !== "" ? cell.dataset.points : "–";
+      const resVal = cell.dataset.result || "";
+      const opp = cell.dataset.opp || "";
+      const oppCats = cell.dataset.oppPoints || "";
+      let diffText = "";
+      if (cell.dataset.points !== "" && oppCats !== "") {
+        const diff = Number(cell.dataset.points) - Number(oppCats);
+        if (!Number.isNaN(diff)) {
+          if (diff > 0) diffText = "Outscored opponent by " + diff;
+          else if (diff < 0) diffText = "Trailed opponent by " + Math.abs(diff);
+          else diffText = "Tied in categories";
+        }
+      }
+
+      tooltip.innerHTML =
+        `<strong>${escapeHTML(team)}</strong>` +
+        `<div>Week ${escapeHTML(week)} · ${escapeHTML(cats)} cats${resVal ? " " + escapeHTML(resVal) : ""}</div>` +
+        (opp
+          ? `<div>vs ${escapeHTML(opp)}${oppCats !== "" ? " · " + escapeHTML(oppCats) + " cats" : ""}</div>`
+          : "") +
+        (diffText ? `<div class="meta">${escapeHTML(diffText)}</div>` : "");
+    }
+
+    function positionTooltipAt(x, y) {
+      const rect = tooltip.getBoundingClientRect();
+      let left = x + OFFSET_X;
+      let top = y + OFFSET_Y;
+      if (left + rect.width > window.innerWidth - 12) {
+        left = Math.max(12, x - rect.width - OFFSET_X);
+      }
+      if (top + rect.height > window.innerHeight - 12) {
+        top = Math.max(12, y - rect.height - OFFSET_Y);
+      }
+      if (left < 12) left = 12;
+      if (top < 12) top = 12;
+      tooltip.style.left = left + 'px';
+      tooltip.style.top = top + 'px';
+    }
+
+    function showTooltip(cell, x, y) {
+      buildTooltip(cell);
+      tooltip.hidden = false;
+      positionTooltipAt(x, y);
+    }
+
+    function hideTooltip() {
+      tooltip.hidden = true;
+    }
+
+    cells.forEach((cell) => {
+      cell.addEventListener("mouseenter", (evt) => {
+        showTooltip(cell, evt.clientX, evt.clientY);
+      });
+      cell.addEventListener("mousemove", (evt) => {
+        if (!tooltip.hidden) positionTooltipAt(evt.clientX, evt.clientY);
+      });
+      cell.addEventListener("mouseleave", hideTooltip);
+      cell.addEventListener("focus", () => {
+        const rect = cell.getBoundingClientRect();
+        showTooltip(cell, rect.left + rect.width / 2, rect.top);
+      });
+      cell.addEventListener("blur", hideTooltip);
+    });
+  }
+  load();
+</script>
